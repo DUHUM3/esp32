@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:async';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   runApp(MyApp());
@@ -31,8 +32,13 @@ class _AttendancePageState extends State<AttendancePage> {
   String attendanceStatus = "Initializing...";
   bool isScanning = false;
   bool isConnected = false;
+  bool isCheckedIn = false;
   StreamSubscription? _scanSubscription;
   StreamSubscription? _stateSubscription;
+  Timer? _attendanceTimer;
+  Duration _attendanceDuration = Duration.zero;
+  DateTime? _checkInTime;
+  DateTime? _checkOutTime;
 
   @override
   void initState() {
@@ -40,9 +46,30 @@ class _AttendancePageState extends State<AttendancePage> {
     _checkPermissions();
   }
 
+  @override
+  void dispose() {
+    _scanSubscription?.cancel();
+    _stateSubscription?.cancel();
+    _attendanceTimer?.cancel();
+    _disconnectDevice();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _attendanceTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+      setState(() {
+        _attendanceDuration += Duration(seconds: 1);
+      });
+    });
+  }
+
+  void _stopTimer() {
+    _attendanceTimer?.cancel();
+    _attendanceDuration = Duration.zero;
+  }
+
   Future<void> _checkPermissions() async {
     try {
-      // Request Bluetooth permissions
       Map<Permission, PermissionStatus> statuses = await [
         Permission.bluetooth,
         Permission.bluetoothScan,
@@ -66,24 +93,14 @@ class _AttendancePageState extends State<AttendancePage> {
     }
   }
 
-  @override
-  void dispose() {
-    _scanSubscription?.cancel();
-    _stateSubscription?.cancel();
-    _disconnectDevice();
-    super.dispose();
-  }
-
   Future<void> _initializeBluetooth() async {
     try {
-      // Check if Bluetooth is available
       bool isAvailable = await FlutterBluePlus.isSupported;
       if (!isAvailable) {
         setState(() => attendanceStatus = "Bluetooth is not available");
         return;
       }
 
-      // Check if Bluetooth is on
       bool isOn = await FlutterBluePlus.isOn;
       if (!isOn) {
         setState(() => attendanceStatus = "Please turn on Bluetooth");
@@ -134,13 +151,12 @@ class _AttendancePageState extends State<AttendancePage> {
         attendanceStatus = "Connecting...";
       });
 
-      // Listen to device connection state
       _stateSubscription = device.connectionState.listen((state) {
         setState(() {
           isConnected = state == BluetoothConnectionState.connected;
           if (isConnected) {
             attendanceStatus = "Connected";
-            _discoverServices();
+            _showCheckInSuccess();
           } else {
             attendanceStatus = "Disconnected";
           }
@@ -153,24 +169,77 @@ class _AttendancePageState extends State<AttendancePage> {
     }
   }
 
-  Future<void> _discoverServices() async {
-    try {
-      List<BluetoothService> services = await _device!.discoverServices();
+  void _showCheckInSuccess() {
+    _checkInTime = DateTime.now();
+    _startTimer();
+    setState(() {
+      isCheckedIn = true;
+    });
 
-      for (var service in services) {
-        for (var characteristic in service.characteristics) {
-          if (characteristic.properties.read) {
-            List<int> value = await characteristic.read();
-            setState(() {
-              attendanceStatus = String.fromCharCodes(value);
-            });
-          }
-        }
-      }
-    } catch (e) {
-      setState(
-          () => attendanceStatus = "Service discovery error: ${e.toString()}");
-    }
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Success'),
+        content: Text('Check-in Successful!'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _checkOut() {
+    _checkOutTime = DateTime.now();
+    _stopTimer();
+    setState(() {
+      isCheckedIn = false;
+    });
+
+    // Here you would typically save the attendance record to a database
+    _saveAttendanceRecord();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Check-out Complete'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+                'Check-out Time: ${DateFormat('HH:mm:ss').format(_checkOutTime!)}'),
+            Text('Duration: ${_formatDuration(_attendanceDuration)}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    String twoDigits(int n) => n.toString().padLeft(2, '0');
+    String hours = twoDigits(duration.inHours);
+    String minutes = twoDigits(duration.inMinutes.remainder(60));
+    String seconds = twoDigits(duration.inSeconds.remainder(60));
+    return "$hours:$minutes:$seconds";
+  }
+
+  void _saveAttendanceRecord() {
+    // TODO: Implement database storage
+    print('Saving attendance record:');
+    print(
+        'Check-in: ${DateFormat('yyyy-MM-dd HH:mm:ss').format(_checkInTime!)}');
+    print(
+        'Check-out: ${DateFormat('yyyy-MM-dd HH:mm:ss').format(_checkOutTime!)}');
+    print('Duration: ${_formatDuration(_attendanceDuration)}');
   }
 
   Future<void> _disconnectDevice() async {
@@ -199,14 +268,50 @@ class _AttendancePageState extends State<AttendancePage> {
           children: [
             Text(
               attendanceStatus,
-              style: TextStyle(fontSize: 24),
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
-            SizedBox(height: 20),
+            SizedBox(height: 40),
+            if (isConnected && isCheckedIn)
+              Column(
+                children: [
+                  Text(
+                    'Attendance Duration:',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                  Text(
+                    _formatDuration(_attendanceDuration),
+                    style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            SizedBox(height: 40),
             if (isConnected)
-              ElevatedButton(
-                onPressed: _disconnectDevice,
-                child: Text('Disconnect'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (!isCheckedIn)
+                    ElevatedButton.icon(
+                      onPressed: () => _showCheckInSuccess(),
+                      icon: Icon(Icons.login),
+                      label: Text('Check-in'),
+                      style: ElevatedButton.styleFrom(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                      ),
+                    ),
+                  if (isCheckedIn)
+                    ElevatedButton.icon(
+                      onPressed: _checkOut,
+                      icon: Icon(Icons.logout),
+                      label: Text('Check-out'),
+                      style: ElevatedButton.styleFrom(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                        backgroundColor: Colors.red,
+                      ),
+                    ),
+                ],
               ),
             SizedBox(height: 20),
             ElevatedButton(
